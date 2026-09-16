@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "dotnet-reportgenerator-globaltool": {
+      "version": "5.4.17",
+      "commands": [
+        "reportgenerator"
+      ],
+      "rollForward": false
+    },
+    "jaytwo.nugetcheck.globaltool": {
+      "version": "0.3.2",
+      "commands": [
+        "nugetcheck"
+      ],
+      "rollForward": false
+    }
+  }
+}

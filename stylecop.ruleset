@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RuleSet Name="StyleCopeRules" Description="StyleCopeRules custom ruleset" ToolsVersion="15.0">
+  <IncludeAll Action="Warning" />
+  <Rules AnalyzerId="StyleCop.Analyzers" RuleNamespace="StyleCop.Analyzers">
+    <Rule Id="SA0001" Action="None" /> <!-- XmlCommentAnalysisDisabled -->
+    <Rule Id="SA1005" Action="None" /> <!-- SingleLineCommentsMustBeginWithSingleSpace -->
+    <Rule Id="SA1101" Action="None" /> <!-- PrefixLocalCallsWithThis -->
+    <Rule Id="SA1108" Action="None" /> <!-- BlockStatementsMustNotContainEmbeddedComments -->
+    <Rule Id="SA1118" Action="None" /> <!-- ParameterMustNotSpanMultipleLines -->
+    <Rule Id="SA1300" Action="None" /> <!-- ElementMustBeginWithUpperCaseLetter -->
+    <Rule Id="SA1316" Action="None" /> <!-- TupleElementNamesShouldUseCorrectCasing -->
+    <Rule Id="SA1200" Action="None" /> <!-- UsingDirectivesMustBePlacedCorrectly -->
+    <Rule Id="SA1309" Action="None" /> <!-- FieldNamesMustNotBeginWithUnderscore -->
+    <Rule Id="SA1512" Action="None" /> <!-- SingleLineCommentsMustNotBeFollowedByBlankLine -->
+    <Rule Id="SA1515" Action="None" /> <!-- SingleLineCommentMustBePrecededByBlankLine -->
+    <Rule Id="SA1600" Action="None" /> <!-- ElementsMustBeDocumented -->
+    <Rule Id="SA1601" Action="None" /> <!-- PartialElementsMustBeDocumented -->
+    <Rule Id="SA1602" Action="None" /> <!-- EnumerationItemsMustBeDocumented -->
+    <Rule Id="SA1611" Action="None" /> <!-- ElementParametersMustBeDocumented -->
+    <Rule Id="SA1615" Action="None" /> <!-- ElementReturnValueMustBeDocumented -->
+    <Rule Id="SA1618" Action="None" /> <!-- GenericTypeParametersMustBeDocumented -->
+    <Rule Id="SA1623" Action="None" /> <!-- PropertySummaryDocumentationMustMatchAccessors -->
+    <Rule Id="SA1629" Action="None" /> <!-- DocumentationTextMustEndWithAPeriod -->
+    <Rule Id="SA1633" Action="None" /> <!-- FileMustHaveHeader -->
+    <Rule Id="SA1634" Action="None" /> <!-- FileHeaderMustShowCopyright -->
+    <Rule Id="SA1652" Action="None" /> <!-- EnableXmlDocumentationOutput -->
+  </Rules>
+</RuleSet>

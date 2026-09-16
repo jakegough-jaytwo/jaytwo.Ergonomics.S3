@@ -1,0 +1,11 @@
+{
+  // UseMinioServer requires MinIO to be up and running. From the minio directory, run `make` to start it via Docker.
+  //"UseMinioServer": false,
+  "UseMinioServer": true,
+  "Minio": {
+    "ServiceUrl": "http://localhost:39000",
+    "BucketName": "ergonomics-s3-tests",
+    "AccessKeyId": "minioadmin",
+    "SecretAccessKey": "minioadmin"
+  }
+}

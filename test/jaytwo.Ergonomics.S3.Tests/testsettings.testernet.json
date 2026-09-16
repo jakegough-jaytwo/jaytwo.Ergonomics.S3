@@ -1,0 +1,9 @@
+{
+  "UseMinioServer": true,
+  "Minio": {
+    "ServiceUrl": "http://minio:9000",
+    "BucketName": "ergonomics-s3-tests",
+    "AccessKeyId": "minioadmin",
+    "SecretAccessKey": "minioadmin"
+  }
+}
