@@ -64,7 +64,7 @@ pack:
 		[ -n "$$dir" ] \
 			&& cd "${TOPDIR}" \
 			&& cd "$$dir" \
-			&& dotnet pack -o "${BUILD_PACKED_DIR}" ${PACK_ARG}; \
+			&& dotnet pack -o "${BUILD_PACKED_DIR}" -p:ContinuousIntegrationBuild=true ${PACK_ARG}; \
 	done
 
 pack-beta: PACK_ARG=--version-suffix beta-${TIMESTAMP}

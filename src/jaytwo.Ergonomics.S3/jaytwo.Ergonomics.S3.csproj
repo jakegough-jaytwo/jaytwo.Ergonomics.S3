@@ -11,6 +11,14 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
+  <!-- SourceLink: step-into support and a symbols package. The .NET 8+ SDK supplies the GitHub provider. -->
+  <PropertyGroup>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="jaytwo.Ergonomics.S3.Tests" />
     <None Include="..\..\README.md" Pack="true" PackagePath="" Link="README.md" />
