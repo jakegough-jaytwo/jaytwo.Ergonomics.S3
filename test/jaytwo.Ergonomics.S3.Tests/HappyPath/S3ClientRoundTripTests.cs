@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using Amazon.S3;
+using Amazon.S3.Model;
 using Xunit;
 
 namespace jaytwo.Ergonomics.S3.Tests.HappyPath;
@@ -21,7 +22,7 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
     }
 
     [Fact]
-    public async Task EnsureBucketExists_then_BucketExists()
+    public async Task BucketExists()
     {
         await using var scope = await CreateReadyScopeAsync();
 
@@ -29,26 +30,25 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
     }
 
     [Fact]
-    public async Task Put_get_delete_string_round_trip()
+    public async Task Put_get_delete_bytes_round_trip()
     {
         await using var scope = await CreateReadyScopeAsync();
         var client = scope.Client;
 
         const string key = "notes/hello.txt";
-        const string content = "hello from minio";
+        var bytes = Encoding.UTF8.GetBytes("hello from minio");
 
-        await client.PutObjectAsync(key, content);
+        await client.PutObjectAsync(key, bytes);
 
         Assert.True(await client.ObjectExistsAsync(key));
 
         using (var response = await client.GetObjectAsync(key))
-        using (var reader = new StreamReader(response.ResponseStream, Encoding.UTF8))
+        using (var reader = new StreamReader(response.Body!, Encoding.UTF8))
         {
-            Assert.Equal(content, await reader.ReadToEndAsync());
+            Assert.Equal("hello from minio", await reader.ReadToEndAsync());
         }
 
         await client.DeleteObjectAsync(key);
-
         Assert.False(await client.ObjectExistsAsync(key));
     }
 
@@ -63,10 +63,10 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
 
         await client.PutObjectAsync(key, bytes, put => put.ContentType = "text/plain");
 
-        var metadata = await client.GetObjectMetadataAsync(key);
+        var metadata = await client.HeadObjectAsync(key);
 
-        Assert.Equal("text/plain", metadata.Headers.ContentType);
-        Assert.Equal(bytes.Length, metadata.ContentLength);
+        Assert.Equal("text/plain", metadata.ContentType);
+        Assert.Equal(bytes.Length, metadata.Size);
     }
 
     [Fact]
@@ -83,49 +83,57 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
             await client.PutObjectAsync(key, stream, contentLength: bytes.Length);
         }
 
-        Assert.Equal(bytes, await ReadAllBytesAsync(client, key));
-        Assert.Equal(bytes.Length, (await client.GetObjectMetadataAsync(key)).ContentLength);
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
+        Assert.Equal(bytes.Length, (await client.HeadObjectAsync(key)).Size);
     }
 
     [Fact]
-    public async Task Put_stream_with_md5_and_content_length_round_trip()
+    public async Task Put_stream_with_content_length_and_configure_round_trip()
     {
         await using var scope = await CreateReadyScopeAsync();
         var client = scope.Client;
 
-        const string key = "notes/stream-md5-length.bin";
-        var bytes = Encoding.UTF8.GetBytes("stream with md5 and length");
+        const string key = "notes/stream-length-configure.bin";
+        var bytes = Encoding.UTF8.GetBytes("stream with length and configure");
         var md5 = ComputeMd5(bytes);
 
         using (var stream = new MemoryStream(bytes))
         {
-            await client.PutObjectAsync(key, stream, contentLength: bytes.Length, md5);
+            await client.PutObjectAsync(
+                key,
+                stream,
+                contentLength: bytes.Length,
+                request => request.MD5Digest = Convert.ToBase64String(md5));
         }
 
-        Assert.Equal(bytes, await ReadAllBytesAsync(client, key));
-        Assert.Equal(bytes.Length, (await client.GetObjectMetadataAsync(key)).ContentLength);
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
+        Assert.Equal(bytes.Length, (await client.HeadObjectAsync(key)).Size);
     }
 
     [Fact]
-    public async Task Put_stream_with_md5_without_content_length_round_trip()
+    public async Task Put_stream_with_null_content_length_and_configure_round_trip()
     {
         await using var scope = await CreateReadyScopeAsync();
         var client = scope.Client;
 
-        const string key = "notes/stream-md5-only.bin";
-        var bytes = Encoding.UTF8.GetBytes("stream with md5 only");
+        const string key = "notes/stream-null-length-configure.bin";
+        var bytes = Encoding.UTF8.GetBytes("stream with null length and configure");
         var md5 = ComputeMd5(bytes);
 
         using (var stream = new MemoryStream(bytes))
         {
-            await client.PutObjectAsync(key, stream, contentLength: null, md5);
+            await client.PutObjectAsync(
+                key,
+                stream,
+                contentLength: null,
+                request => request.MD5Digest = Convert.ToBase64String(md5));
         }
 
-        Assert.Equal(bytes, await ReadAllBytesAsync(client, key));
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
     }
 
     [Fact]
-    public async Task Put_stream_with_wrong_md5_is_rejected()
+    public async Task Put_stream_with_wrong_md5_via_configure_is_rejected()
     {
         await using var scope = await CreateReadyScopeAsync();
         var client = scope.Client;
@@ -136,10 +144,33 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
 
         using var stream = new MemoryStream(bytes);
         var ex = await Assert.ThrowsAsync<AmazonS3Exception>(
-            () => client.PutObjectAsync(key, stream, contentLength: bytes.Length, wrongMd5));
+            () => client.PutObjectAsync(
+                key,
+                stream,
+                contentLength: bytes.Length,
+                request => request.MD5Digest = Convert.ToBase64String(wrongMd5)));
 
         Assert.Contains("Digest", ex.ErrorCode ?? ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(await client.ObjectExistsAsync(key));
+    }
+
+    [Fact]
+    public async Task Put_stream_with_content_type_round_trip()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string key = "notes/stream-content-type.bin";
+        var bytes = Encoding.UTF8.GetBytes("content type stream");
+
+        using (var stream = new MemoryStream(bytes))
+        {
+            await client.PutObjectAsync(key, stream, "application/octet-stream");
+        }
+
+        var metadata = await client.HeadObjectAsync(key);
+        Assert.Equal("application/octet-stream", metadata.ContentType);
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
     }
 
     [Fact]
@@ -156,9 +187,69 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
             await client.PutObjectAsync(key, stream, put => put.ContentType = "application/octet-stream");
         }
 
-        var metadata = await client.GetObjectMetadataAsync(key);
-        Assert.Equal("application/octet-stream", metadata.Headers.ContentType);
-        Assert.Equal(bytes, await ReadAllBytesAsync(client, key));
+        var metadata = await client.HeadObjectAsync(key);
+        Assert.Equal("application/octet-stream", metadata.ContentType);
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
+    }
+
+    [Fact]
+    public async Task Put_bytes_with_content_type_round_trip()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string key = "notes/bytes-content-type.txt";
+        var bytes = Encoding.UTF8.GetBytes("hello typed");
+
+        await client.PutObjectAsync(key, bytes, "text/plain");
+
+        var metadata = await client.HeadObjectAsync(key);
+        Assert.Equal("text/plain", metadata.ContentType);
+        Assert.Equal("hello typed", await client.GetObjectStringAsync(key));
+    }
+
+    [Fact]
+    public async Task Put_get_string_helpers_round_trip()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string key = "notes/string-helpers.txt";
+        const string content = "hello helpers";
+        var bytes = Encoding.UTF8.GetBytes(content);
+
+        await client.PutObjectAsync(key, bytes);
+
+        Assert.Equal(content, await client.GetObjectStringAsync(key));
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
+    }
+
+    [Fact]
+    public async Task GetObjectOrNull_and_bytes_or_null_return_null_for_missing_key()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        Assert.Null(await client.GetObjectOrNullAsync("missing-or-null.txt"));
+        Assert.Null(await client.GetObjectBytesOrNullAsync("missing-or-null.txt"));
+        Assert.Null(await client.GetObjectStringOrNullAsync("missing-or-null.txt"));
+    }
+
+    [Fact]
+    public async Task CopyObject_prefixes_source_and_destination()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string source = "notes/copy-source.txt";
+        const string destination = "notes/copy-dest.txt";
+        var bytes = Encoding.UTF8.GetBytes("copy me");
+
+        await client.PutObjectAsync(source, bytes);
+        await client.CopyObjectAsync(source, destination);
+
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(destination));
+        Assert.True(await client.ObjectExistsAsync(source));
     }
 
     [Fact]
@@ -167,14 +258,56 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
         await using var scope = await CreateReadyScopeAsync();
         var client = scope.Client;
 
-        await client.PutObjectAsync("notes/a.txt", "a");
-        await client.PutObjectAsync("notes/b.txt", "b");
+        await client.PutObjectAsync("notes/a.txt", Encoding.UTF8.GetBytes("a"));
+        await client.PutObjectAsync("notes/b.txt", Encoding.UTF8.GetBytes("bb"));
 
         var page = await client.ListObjectsAsync("notes/");
-        var keys = page.Objects.Select(x => x.Key).OrderBy(x => x).ToList();
+        var byKey = page.Objects.OrderBy(x => x.Key).ToList();
 
-        Assert.Equal(new[] { "notes/a.txt", "notes/b.txt" }, keys);
-        Assert.All(keys, key => Assert.DoesNotContain(client.KeyPrefix.TrimEnd('/'), key));
+        Assert.Equal(new[] { "notes/a.txt", "notes/b.txt" }, byKey.Select(x => x.Key));
+        Assert.Equal(1, byKey[0].Size);
+        Assert.Equal(2, byKey[1].Size);
+        Assert.All(byKey, item => Assert.NotNull(item.LastModified));
+        Assert.All(byKey, item => Assert.DoesNotContain(client.KeyPrefix.TrimEnd('/'), item.Key));
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_returns_headers_and_body_together()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string key = "notes/http-browser.bin";
+        var bytes = Encoding.UTF8.GetBytes("payload for headers");
+
+        await client.PutObjectAsync(key, bytes, put => put.ContentType = "text/plain");
+
+        using var file = await client.GetObjectAsync(key);
+
+        Assert.Equal(key, file.Key);
+        Assert.Equal(bytes.Length, file.Size);
+        Assert.Equal("text/plain", file.ContentType);
+        Assert.Equal("text/plain", file.Headers["Content-Type"]);
+        Assert.False(string.IsNullOrEmpty(file.ETag));
+        Assert.NotNull(file.Body);
+        Assert.Equal(bytes, await ReadAllAsync(file.Body!));
+    }
+
+    [Fact]
+    public async Task HeadObjectAsync_returns_same_shape_with_null_body()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string key = "notes/head-only.txt";
+        await client.PutObjectAsync(key, Encoding.UTF8.GetBytes("head"), put => put.ContentType = "text/plain");
+
+        using var head = await client.HeadObjectAsync(key);
+
+        Assert.Equal(key, head.Key);
+        Assert.Equal(4, head.Size);
+        Assert.Equal("text/plain", head.ContentType);
+        Assert.Null(head.Body);
     }
 
     [Fact]
@@ -186,7 +319,7 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
         var keys = new[] { "page/1.txt", "page/2.txt", "page/3.txt" };
         foreach (var key in keys)
         {
-            await client.PutObjectAsync(key, key);
+            await client.PutObjectAsync(key, Encoding.UTF8.GetBytes(key));
         }
 
         var first = await client.ListObjectsAsync("page/", maxKeys: 2);
@@ -219,7 +352,7 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
         var keys = new[] { "start/a.txt", "start/b.txt", "start/c.txt" };
         foreach (var key in keys)
         {
-            await client.PutObjectAsync(key, key);
+            await client.PutObjectAsync(key, Encoding.UTF8.GetBytes(key));
         }
 
         var page = await client.ListObjectsAsync("start/", startAfter: "start/a.txt");
@@ -242,17 +375,41 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
         Assert.False(await scope.Client.ObjectExistsAsync("does-not-exist.txt"));
     }
 
+    [Fact]
+    public async Task PutObjectMultipart_round_trip()
+    {
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+
+        const string key = "notes/multipart.bin";
+        var partLength = S3Client.MinimumMultipartPartLength;
+        var bytes = new byte[partLength + 64];
+        new Random(42).NextBytes(bytes);
+
+        using (var stream = new MemoryStream(bytes))
+        {
+            var put = await client.PutObjectMultipartAsync(key, stream, partLength, "application/octet-stream");
+            Assert.True(put.IsMultipart);
+            Assert.Equal(2, put.PartCount);
+            Assert.Equal(bytes.Length, put.ContentLength);
+        }
+
+        Assert.Equal(bytes, await client.GetObjectBytesAsync(key));
+        var head = await client.HeadObjectAsync(key);
+        Assert.Equal(bytes.Length, head.Size);
+        Assert.Equal("application/octet-stream", head.ContentType);
+    }
+
     private static byte[] ComputeMd5(byte[] bytes)
     {
         using var md5 = MD5.Create();
         return md5.ComputeHash(bytes);
     }
 
-    private static async Task<byte[]> ReadAllBytesAsync(S3Client client, string key)
+    private static async Task<byte[]> ReadAllAsync(Stream stream)
     {
-        using var response = await client.GetObjectAsync(key);
         using var memory = new MemoryStream();
-        await response.ResponseStream.CopyToAsync(memory);
+        await stream.CopyToAsync(memory);
         return memory.ToArray();
     }
 
@@ -261,7 +418,15 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
         Assert.True(_fixture.Minio.UseMinioServer, "UseMinioServer requires MinIO. From the minio directory, run `make`.");
 
         var scope = _fixture.Minio.CreateScope();
-        await scope.Client.EnsureBucketExistsAsync();
+        // Test harness only. The library does not create buckets.
+        if (!await scope.Client.BucketExistsAsync())
+        {
+            await scope.Client.AmazonS3.PutBucketAsync(new PutBucketRequest
+            {
+                BucketName = scope.Client.BucketName,
+            });
+        }
+
         return scope;
     }
 }

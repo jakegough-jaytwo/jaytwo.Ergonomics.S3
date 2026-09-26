@@ -38,7 +38,7 @@ public static class AmazonS3Extensions
         return client.GetObjectAsync(request, cancellationToken);
     }
 
-    public static Task<GetObjectMetadataResponse> GetObjectMetadataAsync(
+    public static Task<GetObjectMetadataResponse> HeadObjectAsync(
         this IAmazonS3 client,
         Action<GetObjectMetadataRequest> configureRequest,
         CancellationToken cancellationToken = default)
@@ -114,7 +114,7 @@ public static class AmazonS3Extensions
     {
         try
         {
-            await client.GetObjectMetadataAsync(
+            await client.HeadObjectAsync(
                 request =>
                 {
                     request.BucketName = bucketName;
@@ -134,7 +134,6 @@ public static class AmazonS3Extensions
         string bucketName,
         string key,
         Stream inputStream,
-        Action<PutObjectRequest>? configureRequest = null,
         CancellationToken cancellationToken = default)
     {
         Guard.NotNull(inputStream, nameof(inputStream));
@@ -145,7 +144,28 @@ public static class AmazonS3Extensions
                 request.BucketName = bucketName;
                 request.Key = key;
                 request.InputStream = inputStream;
-                configureRequest?.Invoke(request);
+            },
+            cancellationToken);
+    }
+
+    public static Task<PutObjectResponse> PutObjectAsync(
+        this IAmazonS3 client,
+        string bucketName,
+        string key,
+        Stream inputStream,
+        Action<PutObjectRequest> configureRequest,
+        CancellationToken cancellationToken = default)
+    {
+        Guard.NotNull(inputStream, nameof(inputStream));
+        Guard.NotNull(configureRequest, nameof(configureRequest));
+
+        return client.PutObjectAsync(
+            request =>
+            {
+                request.BucketName = bucketName;
+                request.Key = key;
+                request.InputStream = inputStream;
+                configureRequest(request);
             },
             cancellationToken);
     }

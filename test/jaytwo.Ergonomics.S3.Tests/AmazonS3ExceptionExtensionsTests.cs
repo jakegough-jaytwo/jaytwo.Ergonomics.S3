@@ -1,3 +1,4 @@
+using System;
 using System.Net;
 using Amazon.S3;
 using jaytwo.Ergonomics.S3;
@@ -33,5 +34,23 @@ public class AmazonS3ExceptionExtensionsTests
         };
 
         Assert.True(exception.IsNotFound());
+    }
+
+    [Fact]
+    public void IsNotFound_matches_message_containing_404()
+    {
+        var exception = new AmazonS3Exception("HTTP 404 from upstream")
+        {
+            StatusCode = HttpStatusCode.BadRequest,
+        };
+
+        Assert.True(exception.IsNotFound());
+    }
+
+    [Fact]
+    public void IsNotFound_rejects_null()
+    {
+        AmazonS3Exception? exception = null;
+        Assert.Throws<ArgumentNullException>(() => exception!.IsNotFound());
     }
 }

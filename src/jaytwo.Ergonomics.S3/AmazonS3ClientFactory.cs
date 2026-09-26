@@ -7,8 +7,8 @@ namespace jaytwo.Ergonomics.S3;
 
 /// <summary>
 /// Builds an <see cref="IAmazonS3"/> from <see cref="S3ClientOptions"/>.
-/// Custom <see cref="S3ClientOptions.ServiceUrl"/> gets path-style + SigV4;
-/// otherwise the regional AWS endpoint is used.
+/// Custom <see cref="S3ClientOptions.ServiceUrl"/> gets path-style;
+/// otherwise the regional AWS endpoint is used. Signing is always SigV4 (AWSSDK v4).
 /// </summary>
 public static class AmazonS3ClientFactory
 {
@@ -18,7 +18,6 @@ public static class AmazonS3ClientFactory
 
         var s3Config = new AmazonS3Config
         {
-            SignatureVersion = "4",
             SignatureMethod = SigningAlgorithm.HmacSHA256,
         };
 

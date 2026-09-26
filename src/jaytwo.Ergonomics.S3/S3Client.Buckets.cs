@@ -1,22 +1,44 @@
+using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using Amazon.S3.Model;
+using jaytwo.Ergonomics.S3.Logging;
+using jaytwo.Ergonomics.S3.Tracing;
 
 namespace jaytwo.Ergonomics.S3;
 
-public sealed partial class S3Client
+public partial class S3Client
 {
-    public Task<bool> BucketExistsAsync(CancellationToken cancellationToken = default)
-        => AmazonS3.BucketExistsAsync(BucketName, cancellationToken);
-
-    public Task<PutBucketResponse> PutBucketAsync(CancellationToken cancellationToken = default)
-        => AmazonS3.PutBucketAsync(new PutBucketRequest { BucketName = BucketName }, cancellationToken);
-
-    public async Task EnsureBucketExistsAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> BucketExistsAsync(CancellationToken cancellationToken = default)
     {
-        if (!await BucketExistsAsync(cancellationToken).ConfigureAwait(false))
+        var eventLogger = CreateEventLogger();
+        using var activity = StartActivity(ActivityNames.BucketExists, relativeKey: null);
+
+        var actionStopwatch = Stopwatch.StartNew();
+        try
         {
-            await PutBucketAsync(cancellationToken).ConfigureAwait(false);
+            var exists = await AmazonS3.BucketExistsAsync(BucketName, cancellationToken).ConfigureAwait(false);
+            actionStopwatch.Stop();
+
+            eventLogger?.LogBucketExists(BucketName, actionStopwatch.Elapsed, exists);
+            S3Metrics.RecordSuccess(ActivityNames.BucketExists, actionStopwatch.Elapsed);
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            return exists;
+        }
+        catch (Exception ex)
+        {
+            AddExceptionInfo(activity, ex);
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            LogOperationFailure(
+                eventLogger,
+                ActivityNames.BucketExists,
+                BucketName,
+                keyPrefix: null,
+                key: null,
+                actionStopwatch.Elapsed,
+                ex,
+                cancellationToken);
+            throw;
         }
     }
 }
