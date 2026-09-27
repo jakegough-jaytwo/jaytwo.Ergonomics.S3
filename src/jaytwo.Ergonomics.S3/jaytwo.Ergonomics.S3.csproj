@@ -26,7 +26,7 @@
 
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.103.4" />
-    <PackageReference Include="jaytwo.Ergonomics.Logging" Version="0.1.0-beta-20260916204418" />
+    <PackageReference Include="jaytwo.Ergonomics.Logging" Version="0.1.0-beta-20260927082307" />
     <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="6.0.1" />
   </ItemGroup>
 
