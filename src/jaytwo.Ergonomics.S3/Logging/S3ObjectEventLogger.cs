@@ -114,9 +114,9 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.ObjectStreamClosed,
-                "Closed object stream after {elapsed_time} ({bytes_read} bytes read).",
+                "Closed object stream after {elapsed_time} ({bytes_read_pretty} read).",
                 FormatTimePretty(elapsedTime),
-                bytesRead)
+                FormatBytesPretty(bytesRead))
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.GetObjectUse),
                 ("bucket", bucket),
