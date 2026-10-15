@@ -26,10 +26,12 @@ public class S3ObjectEventLogger : EventLogger
             return;
         }
 
+        // Null length (non-seekable stream) renders a marker rather than forking the template.
         BuildMessage(
                 EventIds.ObjectEvents.ObjectPut,
-                "Put object in {elapsed_time}.",
-                FormatTimePretty(elapsedTime))
+                "Put object in {elapsed_time} ({content_length_pretty}).",
+                FormatTimePretty(elapsedTime),
+                FormatBytesPretty(contentLength) ?? "unknown size")
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.PutObject),
                 ("bucket", bucket),
@@ -60,8 +62,10 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.ObjectMultipartPut,
-                "Put object with multipart upload in {elapsed_time}.",
-                FormatTimePretty(elapsedTime))
+                "Put object in {elapsed_time} ({content_length_pretty} in {part_count} parts).",
+                FormatTimePretty(elapsedTime),
+                FormatBytesPretty(contentLength),
+                partCount)
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.PutObjectMultipart),
                 ("bucket", bucket),
@@ -85,7 +89,7 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.ObjectGet,
-                "Got object headers in {elapsed_time}.",
+                "Received object headers in {elapsed_time}.",
                 FormatTimePretty(elapsedTime))
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.GetObject),
@@ -138,7 +142,7 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.ObjectHead,
-                "Headed object in {elapsed_time}.",
+                "Retrieved object metadata in {elapsed_time}.",
                 FormatTimePretty(elapsedTime))
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.HeadObject),
@@ -207,7 +211,7 @@ public class S3ObjectEventLogger : EventLogger
     }
 
     /// <summary>
-    /// Expected miss (GetOrNull / ObjectExists false). Debug, not <see cref="LogOperationFailed"/>.
+    /// Expected miss (GetOrNull / ObjectExists false); both share this template. Debug, not <see cref="LogOperationFailed"/>.
     /// </summary>
     public void LogObjectNotFound(
         string s3Operation,
@@ -224,7 +228,7 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.ObjectNotFound,
-                "Object not found (looked up in {elapsed_time}).",
+                "Object not found after {elapsed_time}.",
                 FormatTimePretty(elapsedTime))
             .WithFields(
                 ("s3_operation", s3Operation),
@@ -246,9 +250,8 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.ObjectListed,
-                "Listed {list_key_count} object{plural} in {elapsed_time}.",
+                "Listed {list_key_count} objects in {elapsed_time}.",
                 keyCount,
-                keyCount == 1 ? string.Empty : "s",
                 FormatTimePretty(elapsedTime))
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.ListObjects),
@@ -274,7 +277,7 @@ public class S3ObjectEventLogger : EventLogger
         {
             BuildMessage(
                     EventIds.ObjectEvents.ObjectExists,
-                    "Object exists check completed in {elapsed_time}.",
+                    "Found object in {elapsed_time}.",
                     FormatTimePretty(elapsedTime))
                 .WithFields(
                     ("s3_operation", S3Client.ActivityNames.ObjectExists),
@@ -289,20 +292,16 @@ public class S3ObjectEventLogger : EventLogger
             return;
         }
 
-        BuildMessage(
-                EventIds.ObjectEvents.ObjectNotFound,
-                "Object does not exist (checked in {elapsed_time}).",
-                FormatTimePretty(elapsedTime))
-            .WithFields(
-                ("s3_operation", S3Client.ActivityNames.ObjectExists),
-                ("bucket", bucket),
-                ("key_prefix", keyPrefix),
-                ("key", key),
-                ("object_exists", false),
-                ("elapsed_time_seconds", FormatTimeSeconds(elapsedTime)))
-            .WithExtraConfig(AddOperationIdIfExists)
-            .WithExtraConfig(extraConfig)
-            .Debug();
+        // Shares LogObjectNotFound so the event keeps one template.
+        LogObjectNotFound(
+            S3Client.ActivityNames.ObjectExists,
+            bucket,
+            keyPrefix,
+            key,
+            elapsedTime,
+            builder => builder
+                .WithFields(("object_exists", false))
+                .WithExtraConfig(extraConfig));
     }
 
     public void LogBucketExists(string bucket, TimeSpan elapsedTime, bool exists, Action<LogBuilder>? extraConfig = null)
@@ -314,8 +313,9 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.BucketExists,
-                "Bucket exists check completed in {elapsed_time}.",
-                FormatTimePretty(elapsedTime))
+                "Checked bucket in {elapsed_time} ({bucket_exists_pretty}).",
+                FormatTimePretty(elapsedTime),
+                exists ? "found" : "not found")
             .WithFields(
                 ("s3_operation", S3Client.ActivityNames.BucketExists),
                 ("bucket", bucket),
@@ -335,7 +335,8 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.OperationFailed,
-                "S3 operation failed after {elapsed_time}.",
+                "{s3_operation} failed after {elapsed_time}.",
+                s3Operation,
                 FormatTimePretty(elapsedTime))
             .WithFields(
                 ("s3_operation", s3Operation),
@@ -370,7 +371,8 @@ public class S3ObjectEventLogger : EventLogger
 
         BuildMessage(
                 EventIds.ObjectEvents.Cancelled,
-                "S3 operation cancelled after {elapsed_time}.",
+                "{s3_operation} cancelled after {elapsed_time}.",
+                s3Operation,
                 FormatTimePretty(elapsedTime))
             .WithFields(
                 ("s3_operation", s3Operation),

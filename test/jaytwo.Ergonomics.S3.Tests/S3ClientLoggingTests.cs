@@ -36,7 +36,30 @@ public class S3ClientLoggingTests
         Assert.Equal("bucket", entry.Fields["bucket"]);
         Assert.Equal("qa1/", entry.Fields["key_prefix"]);
         Assert.Equal(S3Client.ActivityNames.PutObject, entry.Fields["s3_operation"]);
+        Assert.Matches(@"] Put object in \S+ \(2 B\)\.$", entry.Message);
         Assert.False(entry.Fields.ContainsKey("operation_id"));
+    }
+
+    [Fact]
+    public async Task PutObjectAsync_unknown_length_renders_unknown_size()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.PutObjectAsync(It.IsAny<PutObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PutObjectResponse { ETag = "\"abc\"" });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        await client.PutObjectAsync("notes/hello.txt", new ThrowingReadStream(), contentLength: null);
+
+        // assert
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(EventIds.ObjectEvents.ObjectPut.Name, entry.EventId.Name);
+        Assert.Matches(@"] Put object in \S+ \(unknown size\)\.$", entry.Message);
+        Assert.Null(entry.Fields["content_length"]);
     }
 
     [Fact]
@@ -66,6 +89,7 @@ public class S3ClientLoggingTests
         Assert.Equal(S3Client.ActivityNames.PutObjectMultipart, entry.Fields["s3_operation"]);
         Assert.Equal(2L, Convert.ToInt64(entry.Fields["content_length"]));
         Assert.Equal(1, Convert.ToInt32(entry.Fields["part_count"]));
+        Assert.Matches(@"] Put object in \S+ \(2 B in 1 parts\)\.$", entry.Message);
         Assert.False(entry.Fields.ContainsKey("operation_id"));
     }
 
@@ -87,7 +111,10 @@ public class S3ClientLoggingTests
         var exists = await client.ObjectExistsAsync("missing.txt");
 
         Assert.False(exists);
-        Assert.Contains(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectNotFound.Name);
+        var notFound = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectNotFound.Name);
+        Assert.Matches(@"] Object not found after \S+\.$", notFound.Message);
+        Assert.Equal(false, notFound.Fields["object_exists"]);
+        Assert.Equal(S3Client.ActivityNames.ObjectExists, notFound.Fields["s3_operation"]);
         Assert.DoesNotContain(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name);
     }
 
@@ -108,9 +135,10 @@ public class S3ClientLoggingTests
 
         await Assert.ThrowsAsync<AmazonS3Exception>(() => client.GetObjectAsync("notes/hello.txt"));
 
-        Assert.Contains(logger.Entries, e =>
+        var failed = Assert.Single(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name
             && e.Level == LogLevel.Error);
+        Assert.Matches(@"] s3\.get_object failed after \S+\.$", failed.Message);
         Assert.DoesNotContain(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
     }
@@ -133,9 +161,9 @@ public class S3ClientLoggingTests
 
         var response = await client.GetObjectAsync("notes/hello.txt");
 
-        Assert.Contains(logger.Entries, e =>
-            e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name
-            && e.Fields["s3_operation"] as string == S3Client.ActivityNames.GetObject);
+        var get = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
+        Assert.Equal(S3Client.ActivityNames.GetObject, get.Fields["s3_operation"]);
+        Assert.Matches(@"] Received object headers in \S+\.$", get.Message);
         Assert.DoesNotContain(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
 
@@ -150,6 +178,7 @@ public class S3ClientLoggingTests
         Assert.Equal(LogLevel.Debug, closed.Level);
         Assert.Equal(S3Client.ActivityNames.GetObjectUse, closed.Fields["s3_operation"]);
         Assert.Equal(5L, Convert.ToInt64(closed.Fields["bytes_read"]));
+        Assert.Matches(@"] Closed object stream after \S+ \(5 B read\)\.$", closed.Message);
         Assert.Equal("notes/hello.txt", closed.Fields["key"]);
         Assert.Equal(
             logger.Entries.Find(e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name)!.Fields["operation_id"],
@@ -212,9 +241,10 @@ public class S3ClientLoggingTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             client.PutObjectAsync("notes/hello.txt", Encoding.UTF8.GetBytes("hi"), cts.Token));
 
-        Assert.Contains(logger.Entries, e =>
+        var cancelled = Assert.Single(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.Cancelled.Name
             && e.Level == LogLevel.Warning);
+        Assert.Matches(@"] s3\.put_object cancelled after \S+\.$", cancelled.Message);
     }
 
     [Fact]
@@ -238,6 +268,7 @@ public class S3ClientLoggingTests
         var notFound = Assert.Single(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.ObjectNotFound.Name);
         Assert.Equal(LogLevel.Debug, notFound.Level);
+        Assert.Matches(@"] Object not found after \S+\.$", notFound.Message);
         Assert.Equal(S3Client.ActivityNames.GetObject, notFound.Fields["s3_operation"]);
         Assert.Equal("missing.txt", notFound.Fields["key"]);
         Assert.False(notFound.Fields.ContainsKey("operation_id"));
@@ -297,6 +328,25 @@ public class S3ClientLoggingTests
         Assert.Equal("notes/b.txt", entry.Fields["key"]);
         Assert.Equal(S3Client.ActivityNames.CopyObject, entry.Fields["s3_operation"]);
         Assert.False(entry.Fields.ContainsKey("operation_id"));
+    }
+
+    [Theory]
+    [InlineData(true, "found")]
+    [InlineData(false, "not found")]
+    public void LogBucketExists_renders_result_in_message(bool exists, string expected)
+    {
+        // arrange
+        var logger = new CapturingLogger();
+        var eventLogger = new S3ObjectEventLogger(logger);
+
+        // act
+        eventLogger.LogBucketExists("bucket", TimeSpan.FromMilliseconds(5), exists);
+
+        // assert
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(EventIds.ObjectEvents.BucketExists.Name, entry.EventId.Name);
+        Assert.Matches($@"] Checked bucket in \S+ \({expected}\)\.$", entry.Message);
+        Assert.Equal(exists, entry.Fields["bucket_exists"]);
     }
 
     private static S3ClientOptions PrefixOptions() => new()
@@ -376,7 +426,7 @@ public class S3ClientLoggingTests
                 }
             }
 
-            Entries.Add(new LogEntry(logLevel, eventId, fields, exception));
+            Entries.Add(new LogEntry(logLevel, eventId, formatter(state, exception), fields, exception));
         }
 
         private void RestoreScope(Scope? scope) => _currentScope.Value = scope;
@@ -403,6 +453,7 @@ public class S3ClientLoggingTests
     private sealed record LogEntry(
         LogLevel Level,
         EventId EventId,
+        string Message,
         Dictionary<string, object?> Fields,
         Exception? Exception);
 }
