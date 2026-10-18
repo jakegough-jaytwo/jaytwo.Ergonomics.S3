@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
@@ -291,6 +292,60 @@ public class S3ClientRoundTripTests : IClassFixture<TestFixture>
         Assert.False(string.IsNullOrEmpty(file.ETag));
         Assert.NotNull(file.Body);
         Assert.Equal(bytes, await ReadAllAsync(file.Body!));
+        Assert.Null(file.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_range_reads_a_slice_suffix_open_end_and_a_shortened_tail()
+    {
+        // arrange
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+        const string key = "notes/range.bin";
+        var payload = Encoding.UTF8.GetBytes("0123456789");
+        await client.PutObjectAsync(key, payload);
+
+        // act
+        using var slice = await client.GetObjectAsync(key, new S3ByteRange(2, 4));
+        var sliceBytes = await ReadAllAsync(slice.Body!);
+        var tail = await client.GetObjectBytesAsync(key, S3ByteRange.Suffix(3));
+        var rest = await client.GetObjectBytesAsync(key, S3ByteRange.FromOffset(8));
+        using var shortened = await client.GetObjectAsync(key, new S3ByteRange(8, 100));
+        var shortenedBytes = await ReadAllAsync(shortened.Body!);
+        var whole = await client.GetObjectBytesAsync(key, S3ByteRange.Suffix(payload.Length + 50));
+
+        // assert
+        Assert.Equal(4, slice.Size);
+        Assert.Equal(2, slice.ContentRange!.Value.Start);
+        Assert.Equal(5, slice.ContentRange.Value.End);
+        Assert.Equal(payload.Length, slice.ContentRange.Value.ObjectSize);
+        Assert.Equal(Encoding.UTF8.GetBytes("2345"), sliceBytes);
+        Assert.Equal(Encoding.UTF8.GetBytes("789"), tail);
+        Assert.Equal(Encoding.UTF8.GetBytes("89"), rest);
+        Assert.Equal(2, shortened.Size);
+        Assert.Equal(8, shortened.ContentRange!.Value.Start);
+        Assert.Equal(9, shortened.ContentRange.Value.End);
+        Assert.Equal(payload.Length, shortened.ContentRange.Value.ObjectSize);
+        Assert.Equal(Encoding.UTF8.GetBytes("89"), shortenedBytes);
+        Assert.Equal(payload, whole);
+    }
+
+    [Fact]
+    public async Task GetObjectOrNullAsync_unsatisfiable_range_throws()
+    {
+        // arrange
+        await using var scope = await CreateReadyScopeAsync();
+        var client = scope.Client;
+        const string key = "notes/range-416.bin";
+        await client.PutObjectAsync(key, Encoding.UTF8.GetBytes("0123456789"));
+
+        // act
+        var ex = await Assert.ThrowsAsync<AmazonS3Exception>(() =>
+            client.GetObjectOrNullAsync(key, new S3ByteRange(100, 1)));
+
+        // assert
+        Assert.False(ex.IsNotFound());
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, ex.StatusCode);
     }
 
     [Fact]

@@ -80,7 +80,7 @@ public class S3ObjectEventLogger : EventLogger
             .Debug();
     }
 
-    public void LogObjectGet(string bucket, string? keyPrefix, string key, TimeSpan elapsedTime, long? contentLength = null, Action<LogBuilder>? extraConfig = null)
+    public void LogObjectGetHeaders(string bucket, string? keyPrefix, string key, TimeSpan elapsedTime, long? contentLength = null, Action<LogBuilder>? extraConfig = null)
     {
         if (!IsEnabled(LogLevel.Debug))
         {
@@ -88,11 +88,11 @@ public class S3ObjectEventLogger : EventLogger
         }
 
         BuildMessage(
-                EventIds.ObjectEvents.ObjectGet,
+                EventIds.ObjectEvents.ObjectGetHeaders,
                 "Received object headers in {elapsed_time}.",
                 FormatTimePretty(elapsedTime))
             .WithFields(
-                ("s3_operation", S3Client.ActivityNames.GetObject),
+                ("s3_operation", S3Client.ActivityNames.GetObjectHeaders),
                 ("bucket", bucket),
                 ("key_prefix", keyPrefix),
                 ("key", key),
@@ -103,12 +103,18 @@ public class S3ObjectEventLogger : EventLogger
             .Debug();
     }
 
-    public void LogObjectStreamClosed(
+    /// <summary>
+    /// Terminal event of a get: the line and <c>elapsed_time_seconds</c> cover headers + stream use,
+    /// so one event answers "how long did the download take". Phases stay on fields.
+    /// </summary>
+    public void LogObjectGet(
         string bucket,
         string? keyPrefix,
         string key,
-        TimeSpan elapsedTime,
+        TimeSpan headersElapsedTime,
+        TimeSpan streamElapsedTime,
         long bytesRead,
+        long? contentLength = null,
         Action<LogBuilder>? extraConfig = null)
     {
         if (!IsEnabled(LogLevel.Debug))
@@ -116,9 +122,11 @@ public class S3ObjectEventLogger : EventLogger
             return;
         }
 
+        var elapsedTime = headersElapsedTime + streamElapsedTime;
+
         BuildMessage(
-                EventIds.ObjectEvents.ObjectStreamClosed,
-                "Closed object stream after {elapsed_time} ({bytes_read_pretty} read).",
+                EventIds.ObjectEvents.ObjectGet,
+                "Read object in {elapsed_time} ({bytes_read_pretty}).",
                 FormatTimePretty(elapsedTime),
                 FormatBytesPretty(bytesRead))
             .WithFields(
@@ -127,7 +135,10 @@ public class S3ObjectEventLogger : EventLogger
                 ("key_prefix", keyPrefix),
                 ("key", key),
                 ("bytes_read", bytesRead),
-                ("elapsed_time_seconds", FormatTimeSeconds(elapsedTime)))
+                ("content_length", contentLength),
+                ("elapsed_time_seconds", FormatTimeSeconds(elapsedTime)),
+                ("headers_elapsed_time_seconds", FormatTimeSeconds(headersElapsedTime)),
+                ("stream_elapsed_time_seconds", FormatTimeSeconds(streamElapsedTime)))
             .WithExtraConfig(AddOperationIdIfExists)
             .WithExtraConfig(extraConfig)
             .Debug();

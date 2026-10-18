@@ -113,7 +113,7 @@ public class S3ClientTelemetryTests
         var durations = telemetry.SnapshotDurations();
         var errors = telemetry.SnapshotErrors();
 
-        var get = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObject);
+        var get = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObjectHeaders);
         var use = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObjectUse);
         Assert.Equal(ActivityStatusCode.Ok, get.Status);
         Assert.Equal(ActivityStatusCode.Ok, use.Status);
@@ -121,10 +121,12 @@ public class S3ClientTelemetryTests
         var operationId = Assert.IsType<string>(get.GetTagItem("s3.operation_id"));
         Assert.Equal(operationId, use.GetTagItem("s3.operation_id"));
         Assert.Equal(5L, use.GetTagItem("s3.body.size"));
+        Assert.Null(get.GetTagItem("aws.s3.byte_range"));
+        Assert.Null(use.GetTagItem("aws.s3.byte_range"));
 
         Assert.Contains(
             durations,
-            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObject)
+            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObjectHeaders)
                 && !HasTag(m.Tags, S3Metrics.ErrorTypeTagName));
         Assert.Contains(
             durations,
@@ -132,8 +134,39 @@ public class S3ClientTelemetryTests
                 && !HasTag(m.Tags, S3Metrics.ErrorTypeTagName));
         Assert.DoesNotContain(
             errors,
-            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObject)
+            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObjectHeaders)
                 || TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObjectUse));
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_range_tags_the_request_header_on_both_spans()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 4,
+                ContentRange = "bytes 0-3/10",
+                ResponseStream = new MemoryStream(new byte[] { 1, 2, 3, 4 }),
+            });
+
+        using var telemetry = new TelemetryCapture();
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using (var response = await client.GetObjectAsync("notes/hello.txt", new S3ByteRange(0, 4)))
+        {
+            await response.Body!.CopyToAsync(Stream.Null);
+        }
+
+        // assert
+        var activities = telemetry.SnapshotActivities();
+        var get = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObjectHeaders);
+        var use = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObjectUse);
+        Assert.Equal("bytes=0-3", get.GetTagItem("aws.s3.byte_range"));
+        Assert.Equal("bytes=0-3", use.GetTagItem("aws.s3.byte_range"));
     }
 
     [Fact]
@@ -157,16 +190,16 @@ public class S3ClientTelemetryTests
         var durations = telemetry.SnapshotDurations();
         var errors = telemetry.SnapshotErrors();
 
-        var activity = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObject);
+        var activity = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObjectHeaders);
         Assert.Equal(ActivityStatusCode.Ok, activity.Status);
 
         Assert.Contains(
             durations,
-            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObject)
+            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObjectHeaders)
                 && !HasTag(m.Tags, S3Metrics.ErrorTypeTagName));
         Assert.DoesNotContain(
             errors,
-            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObject));
+            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObjectHeaders));
     }
 
     [Fact]
@@ -189,7 +222,7 @@ public class S3ClientTelemetryTests
         var activities = telemetry.SnapshotActivities();
         var errors = telemetry.SnapshotErrors();
 
-        var activity = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObject);
+        var activity = Assert.Single(activities, a => a.OperationName == S3Client.ActivityNames.GetObjectHeaders);
         Assert.Equal(ActivityStatusCode.Error, activity.Status);
         Assert.Equal("Amazon.S3.AmazonS3Exception", activity.GetTagItem("exception.type"));
         Assert.Equal("NoSuchKey", activity.GetTagItem("aws.s3.error_code"));
@@ -197,7 +230,7 @@ public class S3ClientTelemetryTests
 
         Assert.Contains(
             errors,
-            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObject)
+            m => TagEquals(m.Tags, S3Metrics.OperationTagName, S3Client.ActivityNames.GetObjectHeaders)
                 && TagEquals(m.Tags, S3Metrics.ErrorTypeTagName, S3Metrics.NotFoundErrorType));
     }
 

@@ -138,13 +138,13 @@ public class S3ClientLoggingTests
         var failed = Assert.Single(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name
             && e.Level == LogLevel.Error);
-        Assert.Matches(@"] s3\.get_object failed after \S+\.$", failed.Message);
+        Assert.Matches(@"] s3\.get_object\.headers failed after \S+\.$", failed.Message);
         Assert.DoesNotContain(logger.Entries, e =>
-            e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
+            e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
     }
 
     [Fact]
-    public async Task GetObjectAsync_emits_headers_then_stream_closed_on_dispose()
+    public async Task GetObjectAsync_emits_get_headers_then_get_on_dispose()
     {
         var body = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
         var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
@@ -161,11 +161,11 @@ public class S3ClientLoggingTests
 
         var response = await client.GetObjectAsync("notes/hello.txt");
 
-        var get = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
-        Assert.Equal(S3Client.ActivityNames.GetObject, get.Fields["s3_operation"]);
-        Assert.Matches(@"] Received object headers in \S+\.$", get.Message);
+        var getHeaders = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
+        Assert.Equal(S3Client.ActivityNames.GetObjectHeaders, getHeaders.Fields["s3_operation"]);
+        Assert.Matches(@"] Received object headers in \S+\.$", getHeaders.Message);
         Assert.DoesNotContain(logger.Entries, e =>
-            e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
+            e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
 
         var buffer = new byte[5];
         var read = await response.Body!.ReadAsync(buffer, 0, buffer.Length);
@@ -173,16 +173,211 @@ public class S3ClientLoggingTests
 
         response.Dispose();
 
-        var closed = Assert.Single(logger.Entries, e =>
-            e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
-        Assert.Equal(LogLevel.Debug, closed.Level);
-        Assert.Equal(S3Client.ActivityNames.GetObjectUse, closed.Fields["s3_operation"]);
-        Assert.Equal(5L, Convert.ToInt64(closed.Fields["bytes_read"]));
-        Assert.Matches(@"] Closed object stream after \S+ \(5 B read\)\.$", closed.Message);
-        Assert.Equal("notes/hello.txt", closed.Fields["key"]);
+        var get = Assert.Single(logger.Entries, e =>
+            e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
+        Assert.Equal(LogLevel.Debug, get.Level);
+        Assert.Equal(S3Client.ActivityNames.GetObjectUse, get.Fields["s3_operation"]);
+        Assert.Equal(5L, Convert.ToInt64(get.Fields["bytes_read"]));
+        Assert.Equal(5L, Convert.ToInt64(get.Fields["content_length"]));
+        Assert.Matches(@"] Read object in \S+ \(5 B\)\.$", get.Message);
+        Assert.Equal("notes/hello.txt", get.Fields["key"]);
         Assert.Equal(
-            logger.Entries.Find(e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name)!.Fields["operation_id"],
-            closed.Fields["operation_id"]);
+            logger.Entries.Find(e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name)!.Fields["operation_id"],
+            get.Fields["operation_id"]);
+        Assert.False(getHeaders.Fields.ContainsKey("range_start"));
+        Assert.False(get.Fields.ContainsKey("range_start"));
+        Assert.False(get.Fields.ContainsKey("object_size"));
+        Assert.False(getHeaders.Fields.ContainsKey("byte_range"));
+        Assert.False(get.Fields.ContainsKey("byte_range"));
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_range_adds_range_fields_without_changing_the_message()
+    {
+        // arrange
+        var body = new MemoryStream(new byte[] { 1, 2, 3, 4 });
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 4,
+                ContentRange = "bytes 0-3/10",
+                ResponseStream = body,
+            });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        var response = await client.GetObjectAsync("notes/hello.txt", new S3ByteRange(0, 4));
+        await response.Body!.ReadAsync(new byte[4], 0, 4);
+        response.Dispose();
+
+        // assert
+        var getHeaders = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
+        Assert.Matches(@"] Received object headers in \S+\.$", getHeaders.Message);
+        Assert.Equal(4L, Convert.ToInt64(getHeaders.Fields["content_length"]));
+        Assert.Equal(0L, Convert.ToInt64(getHeaders.Fields["range_start"]));
+        Assert.Equal(3L, Convert.ToInt64(getHeaders.Fields["range_end"]));
+        Assert.Equal(10L, Convert.ToInt64(getHeaders.Fields["object_size"]));
+        Assert.Equal("bytes=0-3", getHeaders.Fields["byte_range"]);
+
+        var get = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
+        Assert.Matches(@"] Read object in \S+ \(4 B\)\.$", get.Message);
+        Assert.Equal(4L, Convert.ToInt64(get.Fields["bytes_read"]));
+        Assert.Equal(4L, Convert.ToInt64(get.Fields["content_length"]));
+        Assert.Equal(0L, Convert.ToInt64(get.Fields["range_start"]));
+        Assert.Equal(3L, Convert.ToInt64(get.Fields["range_end"]));
+        Assert.Equal(10L, Convert.ToInt64(get.Fields["object_size"]));
+        Assert.Equal("bytes=0-3", get.Fields["byte_range"]);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_range_omits_object_size_when_the_total_is_unknown()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 2,
+                ContentRange = "bytes 0-1/*",
+                ResponseStream = new MemoryStream(new byte[] { 1, 2 }),
+            });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/hello.txt", new S3ByteRange(0, 2));
+
+        // assert
+        var getHeaders = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
+        Assert.Equal(0L, Convert.ToInt64(getHeaders.Fields["range_start"]));
+        Assert.Equal(1L, Convert.ToInt64(getHeaders.Fields["range_end"]));
+        Assert.False(getHeaders.Fields.ContainsKey("object_size"));
+        Assert.Equal("bytes=0-1", getHeaders.Fields["byte_range"]);
+        Assert.Null(response.ContentRange!.Value.ObjectSize);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_shortened_range_logs_the_request_and_the_returned_bounds()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 2,
+                ContentRange = "bytes 8-9/10",
+                ResponseStream = new MemoryStream(new byte[] { 8, 9 }),
+            });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/hello.txt", new S3ByteRange(8, 100));
+
+        // assert
+        var getHeaders = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
+        Assert.Equal("bytes=8-107", getHeaders.Fields["byte_range"]);
+        Assert.Equal(8L, Convert.ToInt64(getHeaders.Fields["range_start"]));
+        Assert.Equal(9L, Convert.ToInt64(getHeaders.Fields["range_end"]));
+        Assert.Equal(10L, Convert.ToInt64(getHeaders.Fields["object_size"]));
+        Assert.Equal(2, response.Size);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_configure_overwrite_logs_the_header_that_was_sent()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 2,
+                ContentRange = "bytes 5-6/10",
+                ResponseStream = new MemoryStream(new byte[] { 5, 6 }),
+            });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        using var response = await client.GetObjectAsync(
+            "notes/hello.txt",
+            new S3ByteRange(0, 10),
+            get => get.ByteRange = new ByteRange(5, 6));
+
+        // assert
+        var getHeaders = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
+        Assert.Equal("bytes=5-6", getHeaders.Fields["byte_range"]);
+        Assert.Equal(5L, Convert.ToInt64(getHeaders.Fields["range_start"]));
+        Assert.Equal(6L, Convert.ToInt64(getHeaders.Fields["range_end"]));
+        Assert.Equal(2, response.Size);
+    }
+
+    [Fact]
+    public async Task GetObjectOrNullAsync_range_not_found_logs_the_request_range()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AmazonS3Exception("missing")
+            {
+                StatusCode = HttpStatusCode.NotFound,
+                ErrorCode = "NoSuchKey",
+            });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        var response = await client.GetObjectOrNullAsync("missing.txt", new S3ByteRange(0, 4));
+
+        // assert
+        Assert.Null(response);
+        var notFound = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectNotFound.Name);
+        Assert.Equal(LogLevel.Debug, notFound.Level);
+        Assert.Equal("bytes=0-3", notFound.Fields["byte_range"]);
+        Assert.False(notFound.Fields.ContainsKey("range_start"));
+        Assert.Matches(@"] Object not found after \S+\.$", notFound.Message);
+        Assert.DoesNotContain(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name);
+    }
+
+    [Fact]
+    public async Task GetObjectOrNullAsync_unsatisfiable_range_logs_the_request_range_as_a_failure()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AmazonS3Exception("The requested range is not satisfiable")
+            {
+                StatusCode = HttpStatusCode.RequestedRangeNotSatisfiable,
+                ErrorCode = "InvalidRange",
+            });
+
+        var logger = new CapturingLogger();
+        using var client = new S3Client(PrefixOptions(), amazon.Object, logger);
+
+        // act
+        var ex = await Assert.ThrowsAsync<AmazonS3Exception>(() =>
+            client.GetObjectOrNullAsync("notes/hello.txt", new S3ByteRange(100, 1)));
+
+        // assert
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, ex.StatusCode);
+        var failed = Assert.Single(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name);
+        Assert.Equal(LogLevel.Error, failed.Level);
+        Assert.Equal("bytes=100-100", failed.Fields["byte_range"]);
+        Assert.False(failed.Fields.ContainsKey("range_start"));
+        Assert.Matches(@"] s3\.get_object\.headers failed after \S+\.$", failed.Message);
     }
 
     [Fact]
@@ -212,13 +407,13 @@ public class S3ClientLoggingTests
             response.Dispose();
         }
 
-        Assert.Contains(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
+        Assert.Contains(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
         Assert.Contains(logger.Entries, e =>
             e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name
             && e.Fields["s3_operation"] as string == S3Client.ActivityNames.GetObjectUse
             && e.Level == LogLevel.Error);
         Assert.DoesNotContain(logger.Entries, e =>
-            e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
+            e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
     }
 
     [Fact]
@@ -269,14 +464,14 @@ public class S3ClientLoggingTests
             e.EventId.Name == EventIds.ObjectEvents.ObjectNotFound.Name);
         Assert.Equal(LogLevel.Debug, notFound.Level);
         Assert.Matches(@"] Object not found after \S+\.$", notFound.Message);
-        Assert.Equal(S3Client.ActivityNames.GetObject, notFound.Fields["s3_operation"]);
+        Assert.Equal(S3Client.ActivityNames.GetObjectHeaders, notFound.Fields["s3_operation"]);
         Assert.Equal("missing.txt", notFound.Fields["key"]);
         Assert.False(notFound.Fields.ContainsKey("operation_id"));
         Assert.DoesNotContain(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.OperationFailed.Name);
     }
 
     [Fact]
-    public async Task GetObjectBytesAsync_drains_stream_and_emits_get_then_closed()
+    public async Task GetObjectBytesAsync_drains_stream_and_emits_get_headers_then_get()
     {
         var body = new MemoryStream(new byte[] { 9, 8, 7 });
         var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
@@ -294,10 +489,10 @@ public class S3ClientLoggingTests
         var bytes = await client.GetObjectBytesAsync("notes/hello.txt");
 
         Assert.Equal(new byte[] { 9, 8, 7 }, bytes);
-        Assert.Contains(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
-        var closed = Assert.Single(logger.Entries, e =>
-            e.EventId.Name == EventIds.ObjectEvents.ObjectStreamClosed.Name);
-        Assert.Equal(3L, Convert.ToInt64(closed.Fields["bytes_read"]));
+        Assert.Contains(logger.Entries, e => e.EventId.Name == EventIds.ObjectEvents.ObjectGetHeaders.Name);
+        var get = Assert.Single(logger.Entries, e =>
+            e.EventId.Name == EventIds.ObjectEvents.ObjectGet.Name);
+        Assert.Equal(3L, Convert.ToInt64(get.Fields["bytes_read"]));
     }
 
     [Fact]
@@ -347,6 +542,32 @@ public class S3ClientLoggingTests
         Assert.Equal(EventIds.ObjectEvents.BucketExists.Name, entry.EventId.Name);
         Assert.Matches($@"] Checked bucket in \S+ \({expected}\)\.$", entry.Message);
         Assert.Equal(exists, entry.Fields["bucket_exists"]);
+    }
+
+    [Fact]
+    public void LogObjectRead_reports_total_with_phases_on_fields()
+    {
+        // arrange
+        var logger = new CapturingLogger();
+        var eventLogger = new S3ObjectEventLogger(logger);
+
+        // act
+        eventLogger.LogObjectGet(
+            "bucket",
+            null,
+            "notes/hello.txt",
+            TimeSpan.FromMilliseconds(3.4),
+            TimeSpan.FromMilliseconds(0.9),
+            29 * 1024,
+            29 * 1024);
+
+        // assert
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(EventIds.ObjectEvents.ObjectGet.Name, entry.EventId.Name);
+        Assert.Matches(@"] Read object in 4\.3ms \(29 KiB\)\.$", entry.Message);
+        Assert.Equal("0.0043", entry.Fields["elapsed_time_seconds"]);
+        Assert.Equal("0.0034", entry.Fields["headers_elapsed_time_seconds"]);
+        Assert.Equal("0.0009", entry.Fields["stream_elapsed_time_seconds"]);
     }
 
     private static S3ClientOptions PrefixOptions() => new()

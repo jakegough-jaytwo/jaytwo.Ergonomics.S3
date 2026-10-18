@@ -13,9 +13,9 @@ internal static class EventIds
 
         public static readonly EventId ObjectMultipartPut = EventLogger.EventIdFromName(Prefix + "OBJECT_MULTIPART_PUT");
 
-        public static readonly EventId ObjectGet = EventLogger.EventIdFromName(Prefix + "OBJECT_GET");
+        public static readonly EventId ObjectGetHeaders = EventLogger.EventIdFromName(Prefix + "OBJECT_GET_HEADERS");
 
-        public static readonly EventId ObjectStreamClosed = EventLogger.EventIdFromName(Prefix + "OBJECT_STREAM_CLOSED");
+        public static readonly EventId ObjectGet = EventLogger.EventIdFromName(Prefix + "OBJECT_GET");
 
         public static readonly EventId ObjectHead = EventLogger.EventIdFromName(Prefix + "OBJECT_HEAD");
 

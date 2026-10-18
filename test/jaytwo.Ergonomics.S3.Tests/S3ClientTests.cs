@@ -520,6 +520,288 @@ public class S3ClientTests
         Assert.Equal("application/octet-stream", response.Headers["Content-Type"]);
         Assert.NotNull(response.Body);
         Assert.Equal(new byte[] { 1, 2, 3 }, await ReadAllAsync(response.Body!));
+        Assert.Null(response.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_range_sets_inclusive_byte_range_and_prefix()
+    {
+        // arrange
+        GetObjectRequest? captured = null;
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .Callback<GetObjectRequest, CancellationToken>((request, _) => captured = request)
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 1024,
+                ContentRange = "bytes 0-1023/5000",
+                ResponseStream = new MemoryStream(new byte[1024]),
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/a.txt", new S3ByteRange(0, 1024));
+
+        // assert
+        Assert.Equal("bucket", captured!.BucketName);
+        Assert.Equal("app/notes/a.txt", captured.Key);
+        Assert.Equal(0, captured.ByteRange.Start);
+        Assert.Equal(1023, captured.ByteRange.End);
+        Assert.Equal("bytes=0-1023", captured.ByteRange.FormattedByteRange);
+        Assert.Equal(1024, response.Size);
+        Assert.Equal(0, response.ContentRange!.Value.Start);
+        Assert.Equal(1023, response.ContentRange.Value.End);
+        Assert.Equal(1024, response.ContentRange.Value.Length);
+        Assert.Equal(5000, response.ContentRange.Value.ObjectSize);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_open_range_sets_bytes_from_offset()
+    {
+        // arrange
+        GetObjectRequest? captured = null;
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .Callback<GetObjectRequest, CancellationToken>((request, _) => captured = request)
+            .ReturnsAsync(new GetObjectResponse { ResponseStream = new MemoryStream() });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/a.txt", S3ByteRange.FromOffset(100));
+
+        // assert
+        Assert.Equal("bytes=100-", captured!.ByteRange.FormattedByteRange);
+        Assert.Null(response.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_suffix_range_sets_trailing_bytes()
+    {
+        // arrange
+        GetObjectRequest? captured = null;
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .Callback<GetObjectRequest, CancellationToken>((request, _) => captured = request)
+            .ReturnsAsync(new GetObjectResponse { ResponseStream = new MemoryStream() });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/a.txt", S3ByteRange.Suffix(500));
+
+        // assert
+        Assert.Equal("bytes=-500", captured!.ByteRange.FormattedByteRange);
+        Assert.Null(response.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_configure_can_overwrite_byte_range()
+    {
+        // arrange
+        GetObjectRequest? captured = null;
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .Callback<GetObjectRequest, CancellationToken>((request, _) => captured = request)
+            .ReturnsAsync(new GetObjectResponse { ResponseStream = new MemoryStream() });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync(
+            "notes/a.txt",
+            new S3ByteRange(0, 10),
+            get => get.ByteRange = new ByteRange(5, 6));
+
+        // assert
+        Assert.Equal(5, captured!.ByteRange.Start);
+        Assert.Equal(6, captured.ByteRange.End);
+        Assert.Null(response.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_leaves_content_range_null_when_header_is_malformed()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 4,
+                ContentRange = "nope",
+                ResponseStream = new MemoryStream(new byte[] { 1, 2, 3, 4 }),
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/a.txt", new S3ByteRange(0, 4));
+
+        // assert
+        Assert.Equal(4, response.Size);
+        Assert.Null(response.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_leaves_content_range_null_when_the_total_does_not_cover_the_end()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 10,
+                ContentRange = "bytes 0-9/9",
+                ResponseStream = new MemoryStream(new byte[10]),
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/a.txt", new S3ByteRange(0, 10));
+
+        // assert
+        Assert.Equal(10, response.Size);
+        Assert.Null(response.ContentRange);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_leaves_object_size_null_when_content_range_total_is_unknown()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 10,
+                ContentRange = "bytes 0-9/*",
+                ResponseStream = new MemoryStream(new byte[10]),
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        using var response = await client.GetObjectAsync("notes/a.txt", new S3ByteRange(0, 10));
+
+        // assert
+        Assert.Equal(10, response.Size);
+        Assert.Equal(0, response.ContentRange!.Value.Start);
+        Assert.Equal(9, response.ContentRange.Value.End);
+        Assert.Null(response.ContentRange.Value.ObjectSize);
+    }
+
+    [Fact]
+    public async Task GetObjectAsync_rejects_an_uninitialized_range()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            client.GetObjectAsync("notes/a.txt", default(S3ByteRange)));
+
+        // assert
+        Assert.Equal("range", ex.ParamName);
+    }
+
+    [Fact]
+    public async Task GetObjectOrNullAsync_range_not_found_returns_null()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AmazonS3Exception("missing")
+            {
+                StatusCode = HttpStatusCode.NotFound,
+                ErrorCode = "NoSuchKey",
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        var response = await client.GetObjectOrNullAsync("missing.txt", new S3ByteRange(0, 4));
+
+        // assert
+        Assert.Null(response);
+    }
+
+    [Fact]
+    public async Task GetObjectOrNullAsync_unsatisfiable_range_throws()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AmazonS3Exception("The requested range is not satisfiable")
+            {
+                StatusCode = HttpStatusCode.RequestedRangeNotSatisfiable,
+                ErrorCode = "InvalidRange",
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        var ex = await Assert.ThrowsAsync<AmazonS3Exception>(() =>
+            client.GetObjectOrNullAsync("notes/a.txt", new S3ByteRange(100, 1)));
+
+        // assert
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, ex.StatusCode);
+        Assert.False(ex.IsNotFound());
+    }
+
+    [Fact]
+    public async Task GetObjectBytesAsync_range_returns_the_slice()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse
+            {
+                ContentLength = 2,
+                ContentRange = "bytes 2-3/10",
+                ResponseStream = new MemoryStream(new byte[] { 2, 3 }),
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        var bytes = await client.GetObjectBytesAsync("notes/a.txt", new S3ByteRange(2, 2));
+
+        // assert
+        Assert.Equal(new byte[] { 2, 3 }, bytes);
+    }
+
+    [Fact]
+    public async Task GetObjectBytesOrNullAsync_range_not_found_returns_null()
+    {
+        // arrange
+        var amazon = new Mock<IAmazonS3>(MockBehavior.Strict);
+        amazon
+            .Setup(x => x.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AmazonS3Exception("missing")
+            {
+                StatusCode = HttpStatusCode.NotFound,
+                ErrorCode = "NoSuchKey",
+            });
+
+        using var client = new S3Client(PrefixOptions(), amazon.Object);
+
+        // act
+        var bytes = await client.GetObjectBytesOrNullAsync("missing.txt", new S3ByteRange(0, 4));
+
+        // assert
+        Assert.Null(bytes);
     }
 
     [Fact]

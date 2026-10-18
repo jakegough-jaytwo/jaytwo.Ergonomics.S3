@@ -348,6 +348,34 @@ public partial class S3Client
     }
 
     /// <summary>
+    /// Downloads one byte range. <paramref name="range"/> is set on the request before any configure delegate.
+    /// An unsatisfiable range (HTTP 416) throws <see cref="AmazonS3Exception"/>.
+    /// </summary>
+    public async Task<S3ObjectResponse> GetObjectAsync(
+        string key,
+        S3ByteRange range,
+        CancellationToken cancellationToken = default)
+    {
+        GuardRange(range);
+        return (await GetObjectCore(key, extraConfig: null, returnNullIfNotFound: false, cancellationToken, range).ConfigureAwait(false))!;
+    }
+
+    /// <summary>
+    /// Downloads one byte range. <paramref name="range"/> is applied before <paramref name="configureRequest"/>,
+    /// which can overwrite <c>ByteRange</c>.
+    /// </summary>
+    public async Task<S3ObjectResponse> GetObjectAsync(
+        string key,
+        S3ByteRange range,
+        Action<GetObjectRequest> configureRequest,
+        CancellationToken cancellationToken = default)
+    {
+        Guard.NotNull(configureRequest, nameof(configureRequest));
+        GuardRange(range);
+        return (await GetObjectCore(key, configureRequest, returnNullIfNotFound: false, cancellationToken, range).ConfigureAwait(false))!;
+    }
+
+    /// <summary>
     /// Like <see cref="GetObjectAsync(string, CancellationToken)"/>, but returns <c>null</c> on
     /// not-found instead of throwing. Expected misses log <c>S3:OBJECT_NOT_FOUND</c> at Debug
     /// and count as metric success; throwing Get stays Error on miss.
@@ -365,6 +393,29 @@ public partial class S3Client
         return GetObjectCore(key, configureRequest, returnNullIfNotFound: true, cancellationToken);
     }
 
+    /// <inheritdoc cref="GetObjectOrNullAsync(string, CancellationToken)"/>
+    /// <remarks>An unsatisfiable range (HTTP 416) still throws. Only not-found returns <c>null</c>.</remarks>
+    public Task<S3ObjectResponse?> GetObjectOrNullAsync(
+        string key,
+        S3ByteRange range,
+        CancellationToken cancellationToken = default)
+    {
+        GuardRange(range);
+        return GetObjectCore(key, extraConfig: null, returnNullIfNotFound: true, cancellationToken, range);
+    }
+
+    /// <inheritdoc cref="GetObjectOrNullAsync(string, S3ByteRange, CancellationToken)"/>
+    public Task<S3ObjectResponse?> GetObjectOrNullAsync(
+        string key,
+        S3ByteRange range,
+        Action<GetObjectRequest> configureRequest,
+        CancellationToken cancellationToken = default)
+    {
+        Guard.NotNull(configureRequest, nameof(configureRequest));
+        GuardRange(range);
+        return GetObjectCore(key, configureRequest, returnNullIfNotFound: true, cancellationToken, range);
+    }
+
     public async Task<byte[]> GetObjectBytesAsync(string key, CancellationToken cancellationToken = default)
     {
         using var response = await GetObjectAsync(key, cancellationToken).ConfigureAwait(false);
@@ -377,6 +428,27 @@ public partial class S3Client
         CancellationToken cancellationToken = default)
     {
         using var response = await GetObjectAsync(key, configureRequest, cancellationToken).ConfigureAwait(false);
+        return await ReadBodyBytesAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="GetObjectAsync(string, S3ByteRange, CancellationToken)"/>
+    public async Task<byte[]> GetObjectBytesAsync(
+        string key,
+        S3ByteRange range,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await GetObjectAsync(key, range, cancellationToken).ConfigureAwait(false);
+        return await ReadBodyBytesAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="GetObjectAsync(string, S3ByteRange, Action{GetObjectRequest}, CancellationToken)"/>
+    public async Task<byte[]> GetObjectBytesAsync(
+        string key,
+        S3ByteRange range,
+        Action<GetObjectRequest> configureRequest,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await GetObjectAsync(key, range, configureRequest, cancellationToken).ConfigureAwait(false);
         return await ReadBodyBytesAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
@@ -397,6 +469,37 @@ public partial class S3Client
         CancellationToken cancellationToken = default)
     {
         using var response = await GetObjectOrNullAsync(key, configureRequest, cancellationToken).ConfigureAwait(false);
+        if (response is null)
+        {
+            return null;
+        }
+
+        return await ReadBodyBytesAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="GetObjectOrNullAsync(string, S3ByteRange, CancellationToken)"/>
+    public async Task<byte[]?> GetObjectBytesOrNullAsync(
+        string key,
+        S3ByteRange range,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await GetObjectOrNullAsync(key, range, cancellationToken).ConfigureAwait(false);
+        if (response is null)
+        {
+            return null;
+        }
+
+        return await ReadBodyBytesAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="GetObjectOrNullAsync(string, S3ByteRange, Action{GetObjectRequest}, CancellationToken)"/>
+    public async Task<byte[]?> GetObjectBytesOrNullAsync(
+        string key,
+        S3ByteRange range,
+        Action<GetObjectRequest> configureRequest,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await GetObjectOrNullAsync(key, range, configureRequest, cancellationToken).ConfigureAwait(false);
         if (response is null)
         {
             return null;
@@ -937,11 +1040,53 @@ public partial class S3Client
         }
     }
 
+    private void GuardRange(S3ByteRange range) => range.EnsureSpecified(nameof(range));
+
+    /// <summary>
+    /// <paramref name="byteRangeHeader"/> is the Range header actually sent (after configure).
+    /// Response bounds stay on <c>range_start</c> / <c>range_end</c> because a short object
+    /// returns a shorter slice than the request.
+    /// </summary>
+    private Action<LogBuilder>? RangeLogFields(string? byteRangeHeader, S3ContentRange? contentRange)
+    {
+        if (string.IsNullOrEmpty(byteRangeHeader) && contentRange is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            if (!string.IsNullOrEmpty(byteRangeHeader))
+            {
+                builder.WithFields(("byte_range", byteRangeHeader));
+            }
+
+            if (contentRange is not { } range)
+            {
+                return;
+            }
+
+            if (range.ObjectSize is long objectSize)
+            {
+                builder.WithFields(
+                    ("range_start", range.Start),
+                    ("range_end", range.End),
+                    ("object_size", objectSize));
+                return;
+            }
+
+            builder.WithFields(
+                ("range_start", range.Start),
+                ("range_end", range.End));
+        };
+    }
+
     private async Task<S3ObjectResponse?> GetObjectCore(
         string key,
         Action<GetObjectRequest>? extraConfig,
         bool returnNullIfNotFound,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        S3ByteRange? range = null)
     {
         Guard.NotNull(key, nameof(key));
         var keyPrefix = KeyPrefixOrNull();
@@ -949,9 +1094,10 @@ public partial class S3Client
         // Headers + stream use are two events; operation_id joins them.
         var operationId = NewOperationId();
         var eventLogger = CreateEventLogger(operationId);
-        var activity = StartActivity(ActivityNames.GetObject, key, operationId);
+        var activity = StartActivity(ActivityNames.GetObjectHeaders, key, operationId);
 
         var actionStopwatch = Stopwatch.StartNew();
+        string? byteRangeHeader = null;
         try
         {
             var request = new GetObjectRequest
@@ -959,33 +1105,59 @@ public partial class S3Client
                 BucketName = BucketName,
                 Key = GetFullKey(key),
             };
+            if (range is { } byteRange)
+            {
+                request.ByteRange = byteRange.ToByteRange();
+            }
+
             extraConfig?.Invoke(request);
+            byteRangeHeader = request.ByteRange?.FormattedByteRange;
+            if (!string.IsNullOrEmpty(byteRangeHeader))
+            {
+                activity?.SetTag("aws.s3.byte_range", byteRangeHeader);
+            }
 
             var response = await AmazonS3.GetObjectAsync(request, cancellationToken).ConfigureAwait(false);
             actionStopwatch.Stop();
 
-            eventLogger?.LogObjectGet(BucketName, keyPrefix, key, actionStopwatch.Elapsed, response.ContentLength);
-            S3Metrics.RecordSuccess(ActivityNames.GetObject, actionStopwatch.Elapsed);
+            var contentRange = S3ContentRange.TryParse(response.ContentRange);
+            eventLogger?.LogObjectGetHeaders(
+                BucketName,
+                keyPrefix,
+                key,
+                actionStopwatch.Elapsed,
+                response.ContentLength,
+                RangeLogFields(byteRangeHeader, contentRange));
+            S3Metrics.RecordSuccess(ActivityNames.GetObjectHeaders, actionStopwatch.Elapsed);
             activity?.SetStatus(ActivityStatusCode.Ok);
 
             // End headers/TTFB before starting use — two spans, two meanings.
             activity?.Dispose();
             activity = null;
 
-            InstrumentGetObjectResponse(response, operationId, eventLogger, keyPrefix, key);
-            return S3ObjectResponse.FromGet(key, response);
+            InstrumentGetObjectResponse(
+                response,
+                operationId,
+                eventLogger,
+                keyPrefix,
+                key,
+                actionStopwatch.Elapsed,
+                byteRangeHeader,
+                contentRange);
+            return S3ObjectResponse.FromGet(key, response, contentRange);
         }
         catch (AmazonS3Exception ex) when (returnNullIfNotFound && ex.IsNotFound())
         {
             actionStopwatch.Stop();
             // Single-event expected miss: no operation_id (that tag is for multi-event ops).
             CreateEventLogger()?.LogObjectNotFound(
-                ActivityNames.GetObject,
+                ActivityNames.GetObjectHeaders,
                 BucketName,
                 keyPrefix,
                 key,
-                actionStopwatch.Elapsed);
-            S3Metrics.RecordSuccess(ActivityNames.GetObject, actionStopwatch.Elapsed);
+                actionStopwatch.Elapsed,
+                RangeLogFields(byteRangeHeader, contentRange: null));
+            S3Metrics.RecordSuccess(ActivityNames.GetObjectHeaders, actionStopwatch.Elapsed);
             activity?.SetStatus(ActivityStatusCode.Ok);
             return null;
         }
@@ -995,13 +1167,14 @@ public partial class S3Client
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             LogOperationFailure(
                 eventLogger,
-                ActivityNames.GetObject,
+                ActivityNames.GetObjectHeaders,
                 BucketName,
                 keyPrefix,
                 key,
                 actionStopwatch.Elapsed,
                 ex,
-                cancellationToken);
+                cancellationToken,
+                RangeLogFields(byteRangeHeader, contentRange: null));
             throw;
         }
         finally
@@ -1086,7 +1259,10 @@ public partial class S3Client
         string operationId,
         S3ObjectEventLogger? eventLogger,
         string? keyPrefix,
-        string key)
+        string key,
+        TimeSpan headersElapsed,
+        string? byteRangeHeader,
+        S3ContentRange? contentRange)
     {
         if (response.ResponseStream is null)
         {
@@ -1094,8 +1270,14 @@ public partial class S3Client
         }
 
         var useActivity = StartActivity(ActivityNames.GetObjectUse, key, operationId);
+        if (!string.IsNullOrEmpty(byteRangeHeader))
+        {
+            useActivity?.SetTag("aws.s3.byte_range", byteRangeHeader);
+        }
+
         var useStopwatch = Stopwatch.StartNew();
         var inner = response.ResponseStream;
+        var contentLength = response.ContentLength;
 
         response.ResponseStream = new InstrumentedResponseStream(inner, (bytesRead, fault) =>
         {
@@ -1106,7 +1288,15 @@ public partial class S3Client
 
             if (fault is null)
             {
-                eventLogger?.LogObjectStreamClosed(BucketName, keyPrefix, key, elapsed, bytesRead);
+                eventLogger?.LogObjectGet(
+                    BucketName,
+                    keyPrefix,
+                    key,
+                    headersElapsed,
+                    elapsed,
+                    bytesRead,
+                    contentLength,
+                    RangeLogFields(byteRangeHeader, contentRange));
                 S3Metrics.RecordSuccess(ActivityNames.GetObjectUse, elapsed);
                 useActivity?.SetStatus(ActivityStatusCode.Ok);
             }

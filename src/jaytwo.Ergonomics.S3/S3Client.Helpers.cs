@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using Amazon.S3;
+using jaytwo.Ergonomics.Logging;
 using jaytwo.Ergonomics.S3.Logging;
 using jaytwo.Ergonomics.S3.Tracing;
 
@@ -42,16 +43,17 @@ public partial class S3Client
         string? key,
         TimeSpan elapsedTime,
         Exception ex,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<LogBuilder>? extraConfig = null)
     {
         if (cancellationToken.IsCancellationRequested && ex is OperationCanceledException)
         {
-            eventLogger?.LogCancelled(activityName, bucket, keyPrefix, key, elapsedTime, ex);
+            eventLogger?.LogCancelled(activityName, bucket, keyPrefix, key, elapsedTime, ex, extraConfig);
             S3Metrics.RecordFailure(activityName, elapsedTime, S3Metrics.CancelledErrorType);
         }
         else
         {
-            eventLogger?.LogOperationFailed(activityName, bucket, keyPrefix, key, elapsedTime, ex);
+            eventLogger?.LogOperationFailed(activityName, bucket, keyPrefix, key, elapsedTime, ex, extraConfig);
             S3Metrics.RecordFailure(
                 activityName,
                 elapsedTime,
@@ -102,10 +104,10 @@ public partial class S3Client
     {
         public const string PutObject = "s3.put_object";
         public const string PutObjectMultipart = "s3.put_object_multipart";
-        public const string GetObject = "s3.get_object";
+        public const string GetObjectHeaders = "s3.get_object.headers";
         /// <summary>
         /// Hold + drain of <see cref="S3ObjectResponse.Body"/>.
-        /// Headers/TTFB stay on <see cref="GetObject"/>.
+        /// Headers/TTFB stay on <see cref="GetObjectHeaders"/>.
         /// </summary>
         public const string GetObjectUse = "s3.get_object.use";
         public const string HeadObject = "s3.head_object";

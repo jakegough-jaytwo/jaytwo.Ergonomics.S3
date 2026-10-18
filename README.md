@@ -451,18 +451,41 @@ await s3.DeleteObjectAsync("notes/hello.txt", cancellationToken);
 await s3.CopyObjectAsync("notes/hello.txt", "notes/hello-copy.txt", cancellationToken);
 ```
 
-`GetObjectAsync`, `HeadObjectAsync`, `DeleteObjectAsync`, and `CopyObjectAsync` also take a
-configure delegate for range reads, version ids, metadata directives, and the rest of the SDK
-request:
+A byte range is an argument, in offset and length. `new S3ByteRange(0, 1024)` is the first 1024
+bytes (`bytes=0-1023`), not an inclusive end. `S3ByteRange.FromOffset` reads through the end of
+the object, and `S3ByteRange.Suffix` reads the trailing bytes. `ToString()` is that `Range` header.
 
 ```csharp
-using var range = await s3.GetObjectAsync("notes/hello.txt", get => get.ByteRange = new ByteRange(0, 1023));
+using var slice = await s3.GetObjectAsync("notes/hello.txt", new S3ByteRange(0, 1024));
+// slice.Size is the body length (1024). slice.ContentRange?.ObjectSize is the whole object.
+// slice.ContentRange?.Start and End are the inclusive bounds S3 returned.
+
+var tail = await s3.GetObjectBytesAsync("notes/hello.txt", S3ByteRange.Suffix(500));
+var rest = await s3.GetObjectBytesAsync("notes/hello.txt", S3ByteRange.FromOffset(1024));
 ```
 
-`GetObjectStringAsync` decodes UTF-8. OrNull methods return
-`null` on not-found (Debug `S3:OBJECT_NOT_FOUND`, metric success); throwing Get still logs Error
-on a miss. `CopyObjectAsync` prefixes source and destination in the same bucket; override buckets
-or metadata in the configure delegate when you need to.
+`Size` is `Content-Length` for this response. On a full get that is the object size; on a range
+get it is the slice. `ContentRange` is set when S3 returns `Content-Range` (`bytes start-end/size`).
+A missing header, a value that is not that shape, or a total that does not cover the returned
+bytes leaves `ContentRange` null and does not fail the get. A range that runs past the end comes
+back shortened. An unsatisfiable range (416) throws on every get, including the OrNull methods.
+
+`GetObjectAsync`, `HeadObjectAsync`, `DeleteObjectAsync`, and `CopyObjectAsync` also take a
+configure delegate for version ids, metadata directives, and the rest of the SDK request. On a
+ranged get, configure runs after the range and can overwrite `ByteRange`.
+
+```csharp
+using var versioned = await s3.GetObjectAsync(
+    "notes/hello.txt",
+    new S3ByteRange(0, 1024),
+    get => get.VersionId = versionId);
+```
+
+`GetObjectStringAsync` decodes the whole object as UTF-8. A range stays on `GetObjectAsync` or
+`GetObjectBytesAsync`: the bounds are bytes, and decoding a slice can split a character. OrNull
+methods return `null` on not-found (Debug `S3:OBJECT_NOT_FOUND`, metric success); throwing Get still
+logs Error on a miss. `CopyObjectAsync` prefixes source and destination in the same bucket; override
+buckets or metadata in the configure delegate when you need to.
 ### Buckets
 
 ```csharp
@@ -549,7 +572,10 @@ client it produces can be handed to `new S3Client(options, amazonS3)` if you wan
 | `S3ClientOptions.BucketName` null or empty at `S3Client` construction | `ArgumentException` |
 | `maxKeys` below 1 on `ListObjectsAsync` | `ArgumentOutOfRangeException` |
 | Key does not start with `KeyPrefix` in `StripPrefix` / `GetRelativeKey` | `InvalidOperationException` |
-| Anything the service rejects | `AmazonS3Exception`, unchanged from the SDK |
+| `S3ByteRange` offset below 0, length below 1, or offset + length past the last byte index | `ArgumentOutOfRangeException` |
+| Default (`uninitialized`) `S3ByteRange` passed to a get | `ArgumentException` |
+| `S3ContentRange` start below 0, end before start, length past `long`, or object size that does not cover end | `ArgumentOutOfRangeException` |
+| Anything the service rejects, including an unsatisfiable range (416) | `AmazonS3Exception`, unchanged from the SDK |
 
 ## Logging and telemetry
 
@@ -574,9 +600,10 @@ Events use the `S3:*` catalog via `jaytwo.Ergonomics.Logging` (`S3ObjectEventLog
 
 | Event | Level | When |
 | --- | --- | --- |
-| `S3:OBJECT_PUT` / `GET` / `HEAD` / `DELETED` / `COPIED` / `LISTED` | Debug | Success |
+| `S3:OBJECT_PUT` / `HEAD` / `DELETED` / `COPIED` / `LISTED` | Debug | Success |
 | `S3:OBJECT_MULTIPART_PUT` | Debug | Multipart put success (`part_count`, `content_length`) |
-| `S3:OBJECT_STREAM_CLOSED` | Debug | `GetObjectAsync` / `S3ObjectResponse` body disposed |
+| `S3:OBJECT_GET_HEADERS` | Debug | `GetObjectAsync` returned: headers in, body stream open |
+| `S3:OBJECT_GET` | Debug | Get complete: `S3ObjectResponse` body disposed (total time, `bytes_read`) |
 | `S3:OBJECT_EXISTS` / `S3:OBJECT_NOT_FOUND` | Debug | `ObjectExistsAsync` or GetOrNull answered |
 | `S3:BUCKET_EXISTS` | Debug | Bucket existence check |
 | `S3:OPERATION_FAILED` | Error | Unexpected failure |
@@ -589,9 +616,19 @@ id. Single-event calls (put, multipart put, head, delete, copy, exists, one-page
 omit it.
 
 **Get duration is two phases.** `GetObjectAsync` returns when headers are ready and the
-body stream is open — `S3:OBJECT_GET` / `s3.get_object` is time-to-first-byte, same
+body stream is open — `S3:OBJECT_GET_HEADERS` / `s3.get_object.headers` is time-to-first-byte, same
 shape as Head. Drain and hold time land on dispose of the `S3ObjectResponse` (or its
-`Body`): `S3:OBJECT_STREAM_CLOSED` / `s3.get_object.use` with `bytes_read`.
+`Body`): `S3:OBJECT_GET` / `s3.get_object.use` with `bytes_read`.
+`S3:OBJECT_GET` is the one to read for "how long did the download take": its line and
+`elapsed_time_seconds` are headers + stream use (`Read object in 4.3ms (29 KiB).`), with the
+phases on `headers_elapsed_time_seconds` and `stream_elapsed_time_seconds`. Spans and metrics
+stay per phase. A range get uses the same two events. `content_length` and `bytes_read` are the
+slice. `byte_range` is the `Range` header that was sent (`bytes=0-1023`), including when the get
+fails or the object is missing. When the response includes a usable `Content-Range`, the events
+also carry `range_start`, `range_end`, and `object_size` (omitted when the total is `*`). Those
+bounds are what came back, which can be shorter than the request. The headers and stream spans
+are tagged `aws.s3.byte_range` with the same request header.
+
 An undisposed body never finishes the use metric. Byte/string helpers dispose the response after
 draining, so they always close both phases. Put already covers the full upload
 in one duration because the SDK call waits for the body.
@@ -665,6 +702,14 @@ no-op configure.
 | `GetObjectStringAsync(key, configure)` | |
 | `GetObjectStringOrNullAsync(key)` | |
 | `GetObjectStringOrNullAsync(key, configure)` | |
+| `GetObjectAsync(key, S3ByteRange)` | Closed (`offset`, `length`), `FromOffset`, or `Suffix` |
+| `GetObjectAsync(key, S3ByteRange, configure)` | Configure runs after the range and can overwrite it |
+| `GetObjectOrNullAsync(key, S3ByteRange)` | 416 still throws |
+| `GetObjectOrNullAsync(key, S3ByteRange, configure)` | |
+| `GetObjectBytesAsync(key, S3ByteRange)` | |
+| `GetObjectBytesAsync(key, S3ByteRange, configure)` | |
+| `GetObjectBytesOrNullAsync(key, S3ByteRange)` | |
+| `GetObjectBytesOrNullAsync(key, S3ByteRange, configure)` | |
 | `HeadObjectAsync(key)` | HEAD — same `S3ObjectResponse`, `Body` null |
 | `HeadObjectAsync(key, configure)` | |
 | `DeleteObjectAsync(key)` | |
@@ -694,7 +739,9 @@ no-op configure.
 | --- | --- |
 | `S3ObjectListItem` | List row: `Key`, `Size`, `LastModified`, `ETag` |
 | `S3PutObjectResponse` | Put / multipart put: relative `Key`, `ETag`, `VersionId`, `ContentLength?`, `PartCount?` |
-| `S3ObjectResponse` | Get/head: list fields + `ContentType`, `Headers`, `Metadata`, `Body` (`null` on head); `IDisposable` |
+| `S3ByteRange` | Range request: `(offset, length)`, `FromOffset(offset)`, `Suffix(length)` |
+| `S3ContentRange` | Parsed `Content-Range`: `Start`, `End`, `Length`, `ObjectSize?` |
+| `S3ObjectResponse` | Get/head: list fields + `ContentType`, `Headers`, `Metadata`, `Body` (`null` on head), `ContentRange?`; `Size` is `Content-Length`; `IDisposable` |
 | `S3ObjectPage` | `Objects` (`IReadOnlyList<S3ObjectListItem>`, never null), `NextContinuationToken`, `IsTruncated` |
 | `S3Key` | `NormalizePrefix`, `Combine`, `StripPrefix` |
 | `AmazonS3ClientFactory` | `Create(S3ClientOptions)` |
